@@ -1,12 +1,15 @@
-Near constant velocity model for my dynamics, as well as a smooth quadratic
-
 Make filters more like Kalman incorporating uncertainty(think Covariance matrices) and updated Kalman gain.
 Try to plot elipses on plot to show uncertainty.
 
 
-Also include a sense of time in my measurements when plotting.
+
 
 Identify data 
 
 Need to change the markdown so it reflects the thinking behind my 2D components.
 
+For next week:
+Tests to ensure the maths is correct.
+Combine the different parameters to see if I can find an ideal set of values
+Play with data, see if there are already applications of tracking on data.
+Try find data where someone has applied filter to for comparison.
