@@ -753,15 +753,7 @@ for ax, (title, dim_label, refs) in zip(axes, configs):
                    label=f'{fname}  {m:.0f} µs', zorder=2)
         ax.axhspan(m - s, m + s, color=COLORS[fname], alpha=0.07, zorder=1)
 
-    # Annotate crossover with UKF ─────────────────────────────────────────────
-    ukf_mean = refs['UKF'].mean()
-    crossover_candidates = np.where(means >= ukf_mean)[0]
-    if len(crossover_candidates):
-        ci = crossover_candidates[0]
-        ax.axvline(N_arr[ci], color='grey', ls='--', lw=1.4, alpha=0.7)
-        ax.text(N_arr[ci] * 1.05, ukf_mean * 1.05,
-                f'PF ≈ UKF\\nat N={N_arr[ci]}',
-                fontsize=13, color='grey', va='bottom')
+
 
     ax.set_xlabel('Number of particles', fontsize=FS)
     ax.set_ylabel('Mean step time (µs)', fontsize=FS)
