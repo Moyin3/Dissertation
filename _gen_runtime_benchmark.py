@@ -61,7 +61,8 @@ COLORS = {
 }
 MARKERS = {'KF': 'o', 'EKF': 's', 'EKF-FD': 'D', 'UKF': '^', 'PF': 'v'}
 
-np.random.seed(0)   # global reproducibility seed (reset per scenario below)
+SEED = 42   # change this single value to get a different (but still reproducible) run
+np.random.seed(SEED)
 """))
 
 # ── 2 · shared filter implementations ─────────────────────────────────────────
@@ -395,7 +396,7 @@ R1       = np.diag([SIGMA_P**2] * 2)
 Wm1, Wc1, lam1 = ukf_weights(4)
 
 N_TOT = N_WARMUP + N_BENCH
-np.random.seed(42)
+np.random.seed(SEED)
 x0_true1 = np.array([0., 0., 2., 1.])
 true1 = np.zeros((N_TOT, 4)); true1[0] = x0_true1
 for k in range(1, N_TOT):
@@ -433,7 +434,7 @@ times1['UKF'] = run_and_time(ukf1_init, ukf1_step, z1)
 
 # PF ─────────────────────────────────────────────────────────────────────────
 def pf1_init():
-    np.random.seed(142)
+    np.random.seed(SEED + 100)
     return pf_init(N_PF, x0_1, std_pf1)
 def pf1_step(s, z):
     p, w = s
@@ -462,7 +463,7 @@ R2       = np.diag([SIGMA_R**2, SIGMA_TH**2])
 Wm2, Wc2, lam2 = ukf_weights(4)
 ctrv_s2 = lambda s: ctrv_f(s, DT, OMEGA2)
 
-np.random.seed(99)
+np.random.seed(SEED + 1)
 x0_true2 = np.array([500., 0., 0., 10.])
 true2 = np.zeros((N_TOT, 4)); true2[0] = x0_true2
 for k in range(1, N_TOT):
@@ -505,7 +506,7 @@ times2['UKF'] = run_and_time(ukf2_init, ukf2_step, z2)
 
 # PF ─────────────────────────────────────────────────────────────────────────
 def pf2_init():
-    np.random.seed(299)
+    np.random.seed(SEED + 101)
     return pf_init(N_PF, x0_2, std_pf2)
 def pf2_step(s, z):
     p, w = s
@@ -627,7 +628,7 @@ R1d = np.array([[SIGMA_POS_SC**2]])
 Wm1d, Wc1d, lam1d = ukf_weights(2)
 
 N_TOT_SC = N_WARMUP + N_BENCH_PF
-np.random.seed(7)
+np.random.seed(SEED + 2)
 true1d = np.zeros((N_TOT_SC, 2)); true1d[0] = [0., 2.]
 for k in range(1, N_TOT_SC):
     true1d[k] = F_1d @ true1d[k-1]
@@ -686,7 +687,7 @@ for dim_label, true_arr, z_arr, x0_pf, P0_pf, std_pf, \
     for N in N_LIST:
         if dim_label == '1D':
             def _init(N=N):
-                np.random.seed(500 + N)
+                np.random.seed(SEED + 200 + N)
                 return pf_init_1d(N, x0_pf, std_pf)
             def _step(s, z, N=N):
                 p, w = s
@@ -696,7 +697,7 @@ for dim_label, true_arr, z_arr, x0_pf, P0_pf, std_pf, \
                 return (p, w)
         else:
             def _init(N=N):
-                np.random.seed(600 + N)
+                np.random.seed(SEED + 300 + N)
                 return pf_init(N, x0_pf, std_pf)
             def _step(s, z, N=N):
                 p, w = s
@@ -753,15 +754,7 @@ for ax, (title, dim_label, refs) in zip(axes, configs):
                    label=f'{fname}  {m:.0f} µs', zorder=2)
         ax.axhspan(m - s, m + s, color=COLORS[fname], alpha=0.07, zorder=1)
 
-    # Annotate crossover with UKF ─────────────────────────────────────────────
-    ukf_mean = refs['UKF'].mean()
-    crossover_candidates = np.where(means >= ukf_mean)[0]
-    if len(crossover_candidates):
-        ci = crossover_candidates[0]
-        ax.axvline(N_arr[ci], color='grey', ls='--', lw=1.4, alpha=0.7)
-        ax.text(N_arr[ci] * 1.05, ukf_mean * 1.05,
-                f'PF ≈ UKF\\nat N={N_arr[ci]}',
-                fontsize=13, color='grey', va='bottom')
+
 
     ax.set_xlabel('Number of particles', fontsize=FS)
     ax.set_ylabel('Mean step time (µs)', fontsize=FS)
