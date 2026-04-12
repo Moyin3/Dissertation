@@ -726,4 +726,246 @@ plt.savefig("figures/ais_filter_4panel_map.png", bbox_inches="tight")
 plt.close()
 print("  → figures/ais_filter_4panel_map.png")
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. PSEUDO-RMSE VIA DOWNSAMPLING
+#
+#     Approach: each filter runs at FULL temporal resolution (all 612 steps,
+#     full dt_arr) but receives measurement updates only at every-Nth step.
+#     At the N-1 intermediate steps the filter only predicts.
+#     RMSE is then computed over ALL steps against the full-resolution
+#     positions — capturing interpolation quality, not just fit-at-observations.
+# ═════════════════════════════════════════════════════════════════════════════
+print("Figure 10 & 11: Pseudo-RMSE via downsampling …")
+
+
+def kf_run_gapped(positions, dt_arr, obs_mask):
+    """KF at full resolution; update only where obs_mask[k] is True."""
+    n = len(positions)
+    x = np.array([positions[0,0], SOG_MS[0]*np.cos(THETA_0),
+                  positions[0,1], SOG_MS[0]*np.sin(THETA_0)])
+    P = np.diag([SIGMA_GPS**2, 4.0, SIGMA_GPS**2, 4.0])
+    est = []
+    for k in range(n):
+        dt = dt_arr[k]
+        F  = np.array([[1,dt,0,0],[0,1,0,0],[0,0,1,dt],[0,0,0,1]])
+        x  = F @ x
+        P  = F @ P @ F.T + kf_Q_mat(dt)
+        if obs_mask[k]:
+            z = positions[k];  y = z - H_meas @ x
+            S = H_meas @ P @ H_meas.T + R_meas
+            K = P @ H_meas.T @ np.linalg.inv(S)
+            x = x + K @ y
+            P = (np.eye(4) - K @ H_meas) @ P
+            P = (P + P.T) / 2
+        est.append([x[0], x[2]])
+    return np.array(est)
+
+
+def ekf_run_gapped(positions, dt_arr, obs_mask):
+    """EKF at full resolution; update only where obs_mask[k] is True."""
+    n = len(positions)
+    x = np.array([positions[0,0], positions[0,1], SOG_MS[0], THETA_0, 0.0])
+    P = np.diag([SIGMA_GPS**2, SIGMA_GPS**2, 2.0, 0.01, 0.0005])
+    est = []
+    for k in range(n):
+        dt = max(dt_arr[k], 0.5)
+        F  = ctrv_F_jac(x, dt);  x = ctrv_f(x, dt)
+        x[3] = np.arctan2(np.sin(x[3]), np.cos(x[3]))
+        P  = F @ P @ F.T + ctrv_Q(dt)
+        P  = (P + P.T) / 2 + np.eye(5) * 1e-8
+        if obs_mask[k]:
+            z = positions[k];  y = z - H5 @ x
+            S = H5 @ P @ H5.T + R_meas
+            K = P @ H5.T @ np.linalg.inv(S)
+            x = x + K @ y
+            x[2] = max(x[2], 0.0)
+            x[3] = np.arctan2(np.sin(x[3]), np.cos(x[3]))
+            P = (np.eye(5) - K @ H5) @ P
+            P = (P + P.T) / 2 + np.eye(5) * 1e-8
+        est.append([x[0], x[1]])
+    return np.array(est)
+
+
+def ukf_run_gapped(positions, dt_arr, obs_mask):
+    """UKF at full resolution; update only where obs_mask[k] is True."""
+    n = len(positions)
+    x = np.array([positions[0,0], positions[0,1], SOG_MS[0], THETA_0, 0.0])
+    P = np.diag([SIGMA_GPS**2, SIGMA_GPS**2, 2.0, 0.01, 0.0005])
+    est = []
+    for k in range(n):
+        dt = max(dt_arr[k], 0.5)
+        sps, Wm, Wc = sigma_points(x, P)
+        sp_pred = np.array([ctrv_f(sp, dt) for sp in sps])
+        x_pred  = ctrv_circular_mean(sp_pred, Wm)
+        P_pred  = ctrv_Q(dt)
+        for i, sp in enumerate(sp_pred):
+            d    = sp - x_pred;  d[3] = np.arctan2(np.sin(d[3]), np.cos(d[3]))
+            P_pred += Wc[i] * np.outer(d, d)
+        P_pred = (P_pred + P_pred.T) / 2 + np.eye(5) * 1e-8
+        x, P = x_pred, P_pred
+        if obs_mask[k]:
+            z_sigma = sp_pred[:, :2];  z_pred = Wm @ z_sigma
+            Pzz = R_meas.copy();  Pxz = np.zeros((5, 2))
+            for i, sp in enumerate(sp_pred):
+                dz = z_sigma[i] - z_pred
+                dx = sp - x_pred;  dx[3] = np.arctan2(np.sin(dx[3]), np.cos(dx[3]))
+                Pzz += Wc[i] * np.outer(dz, dz)
+                Pxz += Wc[i] * np.outer(dx, dz)
+            K  = Pxz @ np.linalg.inv(Pzz)
+            y  = positions[k] - z_pred
+            x  = x_pred + K @ y
+            x[2] = max(x[2], 0.0)
+            x[3] = np.arctan2(np.sin(x[3]), np.cos(x[3]))
+            P  = P_pred - K @ Pzz @ K.T
+            P  = (P + P.T) / 2 + np.eye(5) * 1e-8
+        est.append([x[0], x[1]])
+    return np.array(est)
+
+
+def pf_run_gapped(positions, dt_arr, obs_mask, n_par=N_PARTICLES, seed=SEED):
+    """PF at full resolution; update only where obs_mask[k] is True."""
+    rng_loc = np.random.default_rng(seed)
+    n = len(positions)
+    par = np.column_stack([
+        rng_loc.normal(positions[0,0], SIGMA_GPS, n_par),
+        rng_loc.normal(positions[0,1], SIGMA_GPS, n_par),
+        np.clip(rng_loc.normal(SOG_MS[0], 1.0,   n_par), 0, None),
+        rng_loc.normal(THETA_0,         0.1,      n_par),
+        rng_loc.normal(0.0,             0.0002,   n_par),
+    ])
+    w   = np.ones(n_par) / n_par
+    ROUGH_SIGMA = np.array([15.0, 15.0, 0.3, 0.01, 0.0002])
+    est = []
+    for k in range(n):
+        dt = max(dt_arr[k], 0.5)
+        for i in range(n_par):
+            par[i] = ctrv_f(par[i], dt)
+        t_q = min(dt, Q_DT_CAP)
+        par[:, 0] += rng_loc.normal(0, 3.0  * np.sqrt(t_q), n_par)
+        par[:, 1] += rng_loc.normal(0, 3.0  * np.sqrt(t_q), n_par)
+        par[:, 2] += rng_loc.normal(0, 0.3  * np.sqrt(t_q), n_par)
+        par[:, 4] += rng_loc.normal(0, 0.0002 * np.sqrt(t_q), n_par)
+        par[:, 2]  = np.clip(par[:, 2], 0, None)
+        if obs_mask[k]:
+            z = positions[k]
+            dx = par[:, 0] - z[0];  dy = par[:, 1] - z[1]
+            log_w  = -0.5 * (dx**2 + dy**2) / SIGMA_GPS**2
+            log_w -= log_w.max()
+            w      = np.exp(log_w);  w /= w.sum()
+            N_eff  = 1.0 / np.sum(w**2)
+            if N_eff < n_par / 2:
+                cumsum = np.cumsum(w)
+                u   = (rng_loc.random() + np.arange(n_par)) / n_par
+                idx = np.searchsorted(cumsum, u)
+                par = par[idx].copy();  w = np.ones(n_par) / n_par
+                par += rng_loc.normal(0, ROUGH_SIGMA, (n_par, 5))
+                par[:, 2] = np.clip(par[:, 2], 0, None)
+        x_est = w @ par
+        est.append([x_est[0], x_est[1]])
+    return np.array(est)
+
+
+DOWNSAMPLE_FACTORS = [2, 3, 5, 10, 15]
+
+rmse_table   = {f: [] for f in FILTERS}
+mean_dt_vals = []
+
+for step in DOWNSAMPLE_FACTORS:
+    # obs_mask: True at every step-th index (filter sees those measurements)
+    obs_mask = np.zeros(N, dtype=bool)
+    obs_mask[::step] = True
+    mean_dt_vals.append(float(np.mean(np.diff(times_s[obs_mask]))))
+
+    kf_e  = kf_run_gapped(positions, dt_arr, obs_mask)
+    ekf_e = ekf_run_gapped(positions, dt_arr, obs_mask)
+    ukf_e = ukf_run_gapped(positions, dt_arr, obs_mask)
+    pf_e  = pf_run_gapped(positions, dt_arr, obs_mask)
+
+    # RMSE over ALL N steps vs full-resolution pseudo-truth
+    for f, est in zip(FILTERS, [kf_e, ekf_e, ukf_e, pf_e]):
+        err = np.linalg.norm(est - positions, axis=1)
+        rmse_table[f].append(float(np.sqrt(np.mean(err**2))))
+
+    print(f"  step={step:2d}  mean_dt={mean_dt_vals[-1]:.0f} s  "
+          + "  ".join(f"{f}={rmse_table[f][-1]:.1f} m" for f in FILTERS))
+
+# ── Figure 10: RMSE vs mean sampling interval ─────────────────────────────────
+print("Figure 10: RMSE vs sampling interval …")
+fig, ax = plt.subplots(figsize=(10, 6))
+for f in FILTERS:
+    ax.plot(mean_dt_vals, rmse_table[f],
+            color=COLORS[f], ls=LSTYLE[f], marker="o", lw=2.0, ms=8, label=f)
+
+ax.set_xlabel("Mean sampling interval (s)")
+ax.set_ylabel("Pseudo-RMSE (m)")
+ax.set_title("Pseudo-RMSE vs Sampling Interval\n"
+             "(filters run at full rate, updates withheld at intermediate steps)")
+ax.legend(fontsize=FS_LEG)
+# light vertical guides at each downsampling rate
+for step, mdt in zip(DOWNSAMPLE_FACTORS, mean_dt_vals):
+    ax.axvline(mdt, color="#dddddd", lw=0.8, zorder=0)
+    ax.text(mdt, ax.get_ylim()[1] * 0.97, f"×{step}",
+            ha="center", va="top", fontsize=FS_LEG - 2, color="#555555")
+plt.tight_layout()
+plt.savefig("figures/ais_rmse_vs_downsampling.png")
+plt.close()
+print("  → figures/ais_rmse_vs_downsampling.png")
+
+# ── Figure 11: Geographic view — full-res vs ×5 gapped + filter traces ────────
+print("Figure 11: Downsampled track map …")
+SHOW_STEP  = 5
+obs_mask5  = np.zeros(N, dtype=bool);  obs_mask5[::SHOW_STEP] = True
+
+# Convert to Mercator helper (defined once here, reused below)
+def est_to_merc(est_xy):
+    lons, lats = xy_to_latlon(est_xy[:, 0], est_xy[:, 1])
+    return np.array([to_merc(lo, la) for lo, la in zip(lons, lats)])
+
+kf_e5  = kf_run_gapped(positions, dt_arr, obs_mask5)
+ekf_e5 = ekf_run_gapped(positions, dt_arr, obs_mask5)
+ukf_e5 = ukf_run_gapped(positions, dt_arr, obs_mask5)
+pf_e5  = pf_run_gapped(positions, dt_arr, obs_mask5)
+
+est5 = {"KF": kf_e5, "EKF": ekf_e5, "UKF": ukf_e5, "PF": pf_e5}
+
+# Mercator coords for the ×5 observation markers (used as filter inputs)
+obs_pos5 = positions[obs_mask5]
+mx_ds5, my_ds5 = zip(*[to_merc(*xy_to_latlon(p[0], p[1])) for p in obs_pos5])
+mean_dt5 = int(np.mean(np.diff(times_s[obs_mask5])))
+
+fig, ax = plt.subplots(figsize=(14, 8))
+
+ax.plot(mx_raw, my_raw, ".", ms=2.5, color="#cccccc", zorder=2,
+        label=f"Full-res AIS (~66 s, pseudo-truth)")
+ax.scatter(mx_ds5, my_ds5, s=40, color="black", zorder=5,
+           label=f"Downsampled obs (×{SHOW_STEP}, ~{mean_dt5//60} min)")
+
+x_span = x_hi - x_lo;  y_span = y_hi - y_lo
+for f in FILTERS:
+    m = est_to_merc(est5[f])
+    in_bounds = (np.all(np.isfinite(m)) and
+                 np.percentile(np.abs(m[:, 0] - (x_lo+x_hi)/2), 95) < x_span * 1.5 and
+                 np.percentile(np.abs(m[:, 1] - (y_lo+y_hi)/2), 95) < y_span * 1.5)
+    if in_bounds:
+        ax.plot(m[:, 0], m[:, 1], color=COLORS[f], ls=LSTYLE[f],
+                lw=1.8, alpha=0.85, label=f)
+    else:
+        ax.plot([], [], color=COLORS[f], ls=LSTYLE[f],
+                lw=1.8, label=f + " (diverged)")
+
+ax.set_xlim(x_lo, x_hi);  ax.set_ylim(y_lo, y_hi)
+try:
+    ctx.add_basemap(ax, crs="EPSG:3857",
+                    source=ctx.providers.CartoDB.Positron, zoom=10)
+except Exception:
+    pass
+ax.set_xticks([]); ax.set_yticks([])
+ax.legend(fontsize=FS_LEG - 2, loc="upper left", framealpha=0.9, ncol=2)
+ax.set_title(f"Filter Interpolation — ×{SHOW_STEP} Downsampled AIS — MAERSK SAIGON",
+             fontsize=FS + 2)
+plt.tight_layout()
+plt.savefig("figures/ais_downsampled_track.png", bbox_inches="tight")
+plt.close()
+print("  → figures/ais_downsampled_track.png")
+
 print("\nAll figures saved to figures/")
